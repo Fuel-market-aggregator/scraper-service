@@ -75,8 +75,10 @@ async def save_to_db_background(raw_data, fuel_type: str):
             brand, s_lat, s_lon, _, address, price = s[0], s[1], s[2], s[3], s[4], s[5]
             
             station_payload = {
-                "brand": brand, "name": f"{brand} - {address[:15]}",
-                "address": address, "lat": float(s_lat), "lon": float(s_lon)
+                "brand": brand,
+                "address": address, 
+                "lat": float(s_lat), 
+                "lon": float(s_lon)
             }
             try:
                 st_res = await client.post(f"{IO_SERVICE_URL}/stations/", json=station_payload)
