@@ -3,6 +3,8 @@ from pydantic import BaseModel
 from typing import List, Optional
 from bs4 import BeautifulSoup
 import httpx
+import asyncio
+from datetime import datetime
 import json
 import math
 import os
@@ -138,3 +140,82 @@ async def get_rankings(
         processed_data.sort(key=lambda x: x.price, reverse=(sort_order == "desc"))
 
     return processed_data[:limit]
+
+@app.get("/history/{station_id}")
+async def get_price_history(
+    station_id: int, 
+    fuel_type: str = Query("Benzina_Regular", description="Tipul de carburant pentru istoric")
+):
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"{IO_SERVICE_URL}/stations/{station_id}/prices")
+            
+            if response.status_code == 404:
+                raise HTTPException(status_code=404, detail="Statia nu a fost gasita sau nu are preturi inregistrate.")
+            
+            all_prices = response.json()
+            
+            history = []
+            for p in all_prices:
+                if p.get("fuel_type") == fuel_type:
+                    raw_date = p.get("timestamp")
+                    clean_date = raw_date.split("T")[0] + " " + raw_date.split("T")[1][:5]
+                    
+                    history.append({
+                        "price": p.get("price_value"),
+                        "date": clean_date
+                    })
+            
+            if not history:
+                return {
+                    "message": f"Nu exista istoric pentru {fuel_type} la statia cu ID-ul {station_id}.", 
+                    "history": []
+                }
+                
+            return {
+                "station_id": station_id,
+                "fuel_type": fuel_type,
+                "total_records": len(history),
+                "history": history
+            }
+            
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=500, detail=f"Eroare de comunicare cu IO-Service: {e}")
+        
+@app.get("/station-status/{station_id}")
+async def get_station_status(station_id: int):
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"{IO_SERVICE_URL}/stations/{station_id}/current-prices")
+            
+            if response.status_code == 404:
+                raise HTTPException(status_code=404, detail="Statia nu are date.")
+                
+            return {
+                "station_id": station_id,
+                "last_update": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "current_prices": response.json()
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        
+async def periodic_scraper():
+    city = "Bucuresti"
+    fuel_types = ["Benzina_Regular", "Motorina_Regular"] 
+    
+    while True:
+        for fuel in fuel_types:
+            try:
+                raw_data = await scrape_fuel_data(city, fuel)
+                if raw_data:
+                    await save_to_db_background(raw_data, fuel)
+                else:
+                    print(f"Nu am gasit date pentru {fuel}.")
+            except Exception as e:
+                print(f"Eroare la procesarea {fuel}: {e}")
+        
+        await asyncio.sleep(300)
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(periodic_scraper())
