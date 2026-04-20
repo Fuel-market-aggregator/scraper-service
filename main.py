@@ -1,4 +1,5 @@
-from fastapi import FastAPI, BackgroundTasks, Query, HTTPException
+from fastapi import FastAPI, BackgroundTasks, Query, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from typing import List, Optional
 from bs4 import BeautifulSoup
@@ -13,6 +14,9 @@ app = FastAPI(title="Scraper & Business Logic Service")
 
 IO_SERVICE_URL = os.getenv("IO_SERVICE_URL", "http://io-service:8000")
 
+AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://auth-service:8002")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="http://localhost:8002/token")
+
 class StationResult(BaseModel):
     id: Optional[int] = None
     brand: str
@@ -20,6 +24,24 @@ class StationResult(BaseModel):
     price: float
     distance_km: Optional[float] = None
     efficiency_score: Optional[float] = None
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"{AUTH_SERVICE_URL}/verify/{token}")
+            
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token invalid sau expirat",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            return response.json()
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Serviciul de autentificare nu este disponibil"
+            )
 
 async def get_coords_from_address(address_text: str):
     url = "https://nominatim.openstreetmap.org/search"
@@ -103,7 +125,8 @@ async def get_rankings(
     fuel_type: str = Query("Benzina_Regular", description="Tipul de carburant"),
     limit: int = Query(5, description="Top X rezultate"),
     sort_order: str = Query("asc", description="'asc' pentru ieftin/bun, 'desc' pentru scump/prost"),
-    address: Optional[str] = Query(None, description="Adresa pentru calculul distantei (optional)")
+    address: Optional[str] = Query(None, description="Adresa pentru calculul distantei (optional)"),
+    user: dict = Depends(get_current_user)
 ):
     raw_data = await scrape_fuel_data(city, fuel_type)
     if not raw_data:
@@ -149,7 +172,8 @@ async def get_rankings(
 @app.get("/history/{station_id}")
 async def get_price_history(
     station_id: int, 
-    fuel_type: str = Query("Benzina_Regular", description="Tipul de carburant pentru istoric")
+    fuel_type: str = Query("Benzina_Regular", description="Tipul de carburant pentru istoric"),
+    user: dict = Depends(get_current_user)
 ):
     async with httpx.AsyncClient() as client:
         try:
@@ -180,7 +204,7 @@ async def get_price_history(
             raise HTTPException(status_code=500, detail=str(e))
         
 @app.get("/station-status/{station_id}")
-async def get_station_status(station_id: int):
+async def get_station_status(station_id: int, user: dict = Depends(get_current_user)):
     async with httpx.AsyncClient() as client:
         try:
             station_res = await client.get(f"{IO_SERVICE_URL}/stations/{station_id}")
