@@ -14,6 +14,7 @@ app = FastAPI(title="Scraper & Business Logic Service")
 IO_SERVICE_URL = os.getenv("IO_SERVICE_URL", "http://io-service:8000")
 
 class StationResult(BaseModel):
+    id: Optional[int] = None
     brand: str
     address: str
     price: float
@@ -106,38 +107,42 @@ async def get_rankings(
 ):
     raw_data = await scrape_fuel_data(city, fuel_type)
     if not raw_data:
-        raise HTTPException(status_code=404, detail="Nu am gasit date pentru acest oras.")
+        raise HTTPException(status_code=404, detail="Nu am gasit date.")
     
     background_tasks.add_task(save_to_db_background, raw_data, fuel_type)
 
     processed_data = []
     
+    async with httpx.AsyncClient() as client:
+        io_res = await client.get(f"{IO_SERVICE_URL}/stations/")
+        existing_stations = {s['address']: s['id'] for s in io_res.json()} if io_res.status_code == 200 else {}
+
+    u_lat, u_lon = (None, None)
     if address:
         u_lat, u_lon = await get_coords_from_address(address)
-        if not u_lat:
-            raise HTTPException(status_code=400, detail="Nu am putut geocoda adresa.")
-            
-        PENALTY_FACTOR = 0.10
-        for s in raw_data:
-            brand, s_lat, s_lon, address_st, price = s[0], float(s[1]), float(s[2]), s[4], float(s[5])
-            dist = calculate_distance(u_lat, u_lon, s_lat, s_lon)
-            score = price + (dist * PENALTY_FACTOR)
-            
-            processed_data.append(StationResult(
-                brand=brand, address=address_st, price=price, 
-                distance_km=round(dist, 2), efficiency_score=round(score, 3)
-            ))
-            
-        processed_data.sort(key=lambda x: x.efficiency_score, reverse=(sort_order == "desc"))
 
-    else:
-        for s in raw_data:
-            brand, address_st, price = s[0], s[4], float(s[5])
-            processed_data.append(StationResult(
-                brand=brand, address=address_st, price=price
-            ))
+    for s in raw_data:
+        brand, s_lat, s_lon, address_st, price = s[0], float(s[1]), float(s[2]), s[4], float(s[5])
+        
+        s_id = existing_stations.get(address_st)
+        
+        dist = calculate_distance(u_lat, u_lon, s_lat, s_lon) if u_lat else None
+        score = price + (dist * 0.10) if dist else None
+        
+        processed_data.append(StationResult(
+            id=s_id,
+            brand=brand, 
+            address=address_st, 
+            price=price, 
+            distance_km=round(dist, 2) if dist else None, 
+            efficiency_score=round(score, 3) if score else None
+        ))
             
-        processed_data.sort(key=lambda x: x.price, reverse=(sort_order == "desc"))
+    reverse_sort = True if sort_order == "desc" else False
+    if address:
+        processed_data.sort(key=lambda x: x.efficiency_score if x.efficiency_score else 999, reverse=reverse_sort)
+    else:
+        processed_data.sort(key=lambda x: x.price, reverse=reverse_sort)
 
     return processed_data[:limit]
 
@@ -148,53 +153,49 @@ async def get_price_history(
 ):
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(f"{IO_SERVICE_URL}/stations/{station_id}/prices")
-            
-            if response.status_code == 404:
-                raise HTTPException(status_code=404, detail="Statia nu a fost gasita sau nu are preturi inregistrate.")
-            
-            all_prices = response.json()
+            station_res = await client.get(f"{IO_SERVICE_URL}/stations/{station_id}")
+            if station_res.status_code != 200:
+                raise HTTPException(status_code=404, detail="Statia nu exista.")
+            station_info = station_res.json()
+
+            prices_res = await client.get(f"{IO_SERVICE_URL}/stations/{station_id}/prices")
+            all_prices = prices_res.json() if prices_res.status_code == 200 else []
             
             history = []
             for p in all_prices:
                 if p.get("fuel_type") == fuel_type:
                     raw_date = p.get("timestamp")
                     clean_date = raw_date.split("T")[0] + " " + raw_date.split("T")[1][:5]
-                    
-                    history.append({
-                        "price": p.get("price_value"),
-                        "date": clean_date
-                    })
+                    history.append({"price": p.get("price_value"), "date": clean_date})
             
-            if not history:
-                return {
-                    "message": f"Nu exista istoric pentru {fuel_type} la statia cu ID-ul {station_id}.", 
-                    "history": []
-                }
-                
             return {
                 "station_id": station_id,
+                "brand": station_info.get("brand"),
+                "address": station_info.get("address"),
                 "fuel_type": fuel_type,
                 "total_records": len(history),
                 "history": history
             }
-            
-        except httpx.RequestError as e:
-            raise HTTPException(status_code=500, detail=f"Eroare de comunicare cu IO-Service: {e}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
         
 @app.get("/station-status/{station_id}")
 async def get_station_status(station_id: int):
     async with httpx.AsyncClient() as client:
         try:
+            station_res = await client.get(f"{IO_SERVICE_URL}/stations/{station_id}")
+            if station_res.status_code != 200:
+                raise HTTPException(status_code=404, detail="Statia nu exista.")
+            station_info = station_res.json()
+
             response = await client.get(f"{IO_SERVICE_URL}/stations/{station_id}/current-prices")
             
-            if response.status_code == 404:
-                raise HTTPException(status_code=404, detail="Statia nu are date.")
-                
             return {
                 "station_id": station_id,
+                "brand": station_info.get("brand"),
+                "address": station_info.get("address"),
                 "last_update": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "current_prices": response.json()
+                "current_prices": response.json() if response.status_code == 200 else []
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
