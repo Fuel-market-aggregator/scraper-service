@@ -10,12 +10,16 @@ import json
 import math
 import os
 
-app = FastAPI(title="Scraper & Business Logic Service")
+
+app = FastAPI(
+    title="Scraper & Business Logic Service",
+    root_path="/scraper"
+)
 
 IO_SERVICE_URL = os.getenv("IO_SERVICE_URL", "http://io-service:8000")
 
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://auth-service:8002")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="http://localhost:8002/token")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="http://localhost/auth/token")
 
 class StationResult(BaseModel):
     id: Optional[int] = None
